@@ -201,8 +201,8 @@ jobs:
           }
 
           void SteamStub::findLeaderboard(const Variant &p_name) {
-              // The game awaits this signal, so answer (deferred) with "not found".
-              call_deferred("emit_signal", "leaderboard_find_result", 0, 0);
+              // The game awaits this signal, so answer (deferred) with a fake valid handle.
+              call_deferred("emit_signal", "leaderboard_find_result", 1, 1);
           }
 
           void SteamStub::uploadLeaderboardScore(const Variant &p_score, const Variant &p_keep_best, const Variant &p_details, const Variant &p_leaderboard) {
@@ -254,6 +254,191 @@ jobs:
           STUB_EOF
 
           ls -la
+
+      - name: Patch GodotApp (touch gestures + fullscreen)
+        run: |
+          APP=$(find platform/android/java -name GodotApp.java | head -n1)
+          echo "Patching: $APP"
+          test -n "$APP"
+
+          cat > /tmp/touch_snippet.java <<'JAVA_EOF'
+
+              // ===== Touch -> mouse gestures + fullscreen (patched in by the build workflow) =====
+              // Tap = left click. Hold ~0.22 s = press and hold (drag items). Slide = move cursor (hover).
+              // Two-finger tap = right click.
+              private static final long TM_LONG_PRESS_MS = 220;
+              private static final long TM_TAP_RELEASE_MS = 35;
+              private final android.os.Handler tmHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+              private boolean tmDown = false;
+              private boolean tmPressed = false;
+              private boolean tmMoved = false;
+              private boolean tmSecondary = false;
+              private float tmStartX = 0, tmStartY = 0, tmX = 0, tmY = 0;
+              private long tmDownTime = 0;
+
+              private final Runnable tmLongPress = new Runnable() {
+                  @Override
+                  public void run() {
+                      if (tmDown && !tmMoved && !tmSecondary && !tmPressed) {
+                          tmPressed = true;
+                          tmSend(android.view.MotionEvent.ACTION_DOWN, android.view.MotionEvent.BUTTON_PRIMARY, tmX, tmY);
+                          getWindow().getDecorView().performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS);
+                      }
+                  }
+              };
+
+              private void tmSend(int action, int buttons, float x, float y) {
+                  long now = android.os.SystemClock.uptimeMillis();
+                  if (action == android.view.MotionEvent.ACTION_DOWN) {
+                      tmDownTime = now;
+                  }
+                  android.view.MotionEvent.PointerProperties[] props = new android.view.MotionEvent.PointerProperties[1];
+                  props[0] = new android.view.MotionEvent.PointerProperties();
+                  props[0].id = 0;
+                  props[0].toolType = android.view.MotionEvent.TOOL_TYPE_MOUSE;
+                  android.view.MotionEvent.PointerCoords[] coords = new android.view.MotionEvent.PointerCoords[1];
+                  coords[0] = new android.view.MotionEvent.PointerCoords();
+                  coords[0].x = x;
+                  coords[0].y = y;
+                  coords[0].pressure = 1.0f;
+                  coords[0].size = 1.0f;
+                  android.view.MotionEvent e = android.view.MotionEvent.obtain(
+                          tmDownTime == 0 ? now : tmDownTime, now, action, 1, props, coords,
+                          0, buttons, 1.0f, 1.0f, 0, 0, android.view.InputDevice.SOURCE_MOUSE, 0);
+                  try {
+                      if (action == android.view.MotionEvent.ACTION_HOVER_MOVE) {
+                          super.dispatchGenericMotionEvent(e);
+                      } else {
+                          super.dispatchTouchEvent(e);
+                      }
+                  } finally {
+                      e.recycle();
+                  }
+              }
+
+              private void tmClick(final int button, final float x, final float y) {
+                  tmSend(android.view.MotionEvent.ACTION_DOWN, button, x, y);
+                  tmHandler.postDelayed(new Runnable() {
+                      @Override
+                      public void run() {
+                          tmSend(android.view.MotionEvent.ACTION_UP, 0, x, y);
+                      }
+                  }, TM_TAP_RELEASE_MS);
+              }
+
+              @Override
+              public boolean dispatchTouchEvent(android.view.MotionEvent ev) {
+                  if (!ev.isFromSource(android.view.InputDevice.SOURCE_TOUCHSCREEN)) {
+                      return super.dispatchTouchEvent(ev);
+                  }
+                  final float slop = 8 * getResources().getDisplayMetrics().density;
+                  switch (ev.getActionMasked()) {
+                      case android.view.MotionEvent.ACTION_DOWN:
+                          tmDown = true;
+                          tmPressed = false;
+                          tmMoved = false;
+                          tmSecondary = false;
+                          tmStartX = tmX = ev.getX();
+                          tmStartY = tmY = ev.getY();
+                          tmSend(android.view.MotionEvent.ACTION_HOVER_MOVE, 0, tmX, tmY);
+                          tmHandler.postDelayed(tmLongPress, TM_LONG_PRESS_MS);
+                          return true;
+                      case android.view.MotionEvent.ACTION_POINTER_DOWN:
+                          if (tmDown && !tmPressed && !tmMoved && !tmSecondary) {
+                              tmSecondary = true;
+                              tmHandler.removeCallbacks(tmLongPress);
+                              tmClick(android.view.MotionEvent.BUTTON_SECONDARY, tmX, tmY);
+                          }
+                          return true;
+                      case android.view.MotionEvent.ACTION_MOVE:
+                          if (!tmDown || tmSecondary || ev.getPointerCount() > 1) {
+                              return true;
+                          }
+                          tmX = ev.getX(0);
+                          tmY = ev.getY(0);
+                          if (tmPressed) {
+                              tmSend(android.view.MotionEvent.ACTION_MOVE, android.view.MotionEvent.BUTTON_PRIMARY, tmX, tmY);
+                          } else {
+                              if (!tmMoved && Math.hypot(tmX - tmStartX, tmY - tmStartY) > slop) {
+                                  tmMoved = true;
+                                  tmHandler.removeCallbacks(tmLongPress);
+                              }
+                              if (tmMoved) {
+                                  tmSend(android.view.MotionEvent.ACTION_HOVER_MOVE, 0, tmX, tmY);
+                              }
+                          }
+                          return true;
+                      case android.view.MotionEvent.ACTION_UP:
+                          tmHandler.removeCallbacks(tmLongPress);
+                          if (tmPressed) {
+                              tmSend(android.view.MotionEvent.ACTION_UP, 0, tmX, tmY);
+                          } else if (!tmMoved && !tmSecondary) {
+                              tmClick(android.view.MotionEvent.BUTTON_PRIMARY, tmX, tmY);
+                          }
+                          tmDown = false;
+                          tmPressed = false;
+                          tmMoved = false;
+                          tmSecondary = false;
+                          return true;
+                      case android.view.MotionEvent.ACTION_CANCEL:
+                          tmHandler.removeCallbacks(tmLongPress);
+                          if (tmPressed) {
+                              tmSend(android.view.MotionEvent.ACTION_UP, 0, tmX, tmY);
+                          }
+                          tmDown = false;
+                          tmPressed = false;
+                          tmMoved = false;
+                          tmSecondary = false;
+                          return true;
+                      default:
+                          return true;
+                  }
+              }
+
+              @Override
+              public void onWindowFocusChanged(boolean hasFocus) {
+                  super.onWindowFocusChanged(hasFocus);
+                  if (hasFocus) {
+                      tmApplyFullscreen();
+                  }
+              }
+
+              @SuppressWarnings("deprecation")
+              private void tmApplyFullscreen() {
+                  android.view.Window w = getWindow();
+                  if (android.os.Build.VERSION.SDK_INT >= 28) {
+                      android.view.WindowManager.LayoutParams lp = w.getAttributes();
+                      lp.layoutInDisplayCutoutMode = android.view.WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+                      w.setAttributes(lp);
+                  }
+                  if (android.os.Build.VERSION.SDK_INT >= 30) {
+                      w.setDecorFitsSystemWindows(false);
+                      android.view.WindowInsetsController c = w.getInsetsController();
+                      if (c != null) {
+                          c.hide(android.view.WindowInsets.Type.systemBars());
+                          c.setSystemBarsBehavior(android.view.WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                      }
+                  } else {
+                      w.getDecorView().setSystemUiVisibility(
+                              android.view.View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                      | android.view.View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                      | android.view.View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                      | android.view.View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                      | android.view.View.SYSTEM_UI_FLAG_FULLSCREEN
+                                      | android.view.View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+                  }
+              }
+          JAVA_EOF
+
+          python3 - "$APP" <<'PY_EOF'
+          import sys
+          p = sys.argv[1]
+          src = open(p, encoding="utf-8").read()
+          snippet = open("/tmp/touch_snippet.java", encoding="utf-8").read()
+          i = src.rstrip().rfind("}")
+          open(p, "w", encoding="utf-8").write(src[:i] + snippet + "\n}\n")
+          PY_EOF
+          tail -n 8 "$APP"
 
       - name: Build Android debug template (arm64)
         run: scons platform=android target=template_debug arch=arm64 generate_android_binaries=yes debug_symbols=no -j4
