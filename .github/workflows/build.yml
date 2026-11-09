@@ -1,0 +1,276 @@
+name: Godot 4.2.1 Android runtime with Steam stub
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    steps:
+      - name: Checkout Godot 4.2.1
+        uses: actions/checkout@v4
+        with:
+          repository: godotengine/godot
+          ref: 4.2.1-stable
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Install Android NDK and tools
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "ndk;23.2.8568313" "cmake;3.10.2.4988404" "platforms;android-33" "build-tools;33.0.2"
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/23.2.8568313" >> "$GITHUB_ENV"
+
+      - name: Install SCons
+        run: pip install scons
+
+      - name: Create steam_stub module
+        run: |
+          mkdir -p modules/steam_stub
+          cd modules/steam_stub
+
+          cat > config.py <<'STUB_EOF'
+          def can_build(env, platform):
+              return True
+
+
+          def configure(env):
+              pass
+          STUB_EOF
+
+          cat > SCsub <<'STUB_EOF'
+          Import("env")
+          Import("env_modules")
+
+          env_steam_stub = env_modules.Clone()
+          env_steam_stub.add_source_files(env.modules_sources, "*.cpp")
+          STUB_EOF
+
+          cat > register_types.h <<'STUB_EOF'
+          #ifndef STEAM_STUB_REGISTER_TYPES_H
+          #define STEAM_STUB_REGISTER_TYPES_H
+
+          #include "modules/register_module_types.h"
+
+          void initialize_steam_stub_module(ModuleInitializationLevel p_level);
+          void uninitialize_steam_stub_module(ModuleInitializationLevel p_level);
+
+          #endif
+          STUB_EOF
+
+          cat > register_types.cpp <<'STUB_EOF'
+          #include "register_types.h"
+
+          #include "core/config/engine.h"
+          #include "core/object/class_db.h"
+          #include "steam_stub.h"
+
+          static SteamStub *steam_stub = nullptr;
+
+          void initialize_steam_stub_module(ModuleInitializationLevel p_level) {
+              if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+                  return;
+              }
+              GDREGISTER_CLASS(SteamStub);
+              steam_stub = memnew(SteamStub);
+              Engine::get_singleton()->add_singleton(Engine::Singleton("Steam", steam_stub));
+          }
+
+          void uninitialize_steam_stub_module(ModuleInitializationLevel p_level) {
+              if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
+                  return;
+              }
+              if (steam_stub) {
+                  memdelete(steam_stub);
+                  steam_stub = nullptr;
+              }
+          }
+          STUB_EOF
+
+          cat > steam_stub.h <<'STUB_EOF'
+          #ifndef STEAM_STUB_H
+          #define STEAM_STUB_H
+
+          #include "core/object/class_db.h"
+          #include "core/object/object.h"
+          #include "core/string/ustring.h"
+          #include "core/variant/array.h"
+          #include "core/variant/dictionary.h"
+          #include "core/variant/variant.h"
+
+          // Offline stand-in for the GodotSteam "Steam" singleton (Android has none).
+          // Only the calls used by the game are implemented.
+          class SteamStub : public Object {
+              GDCLASS(SteamStub, Object);
+
+              static SteamStub *singleton;
+
+          protected:
+              static void _bind_methods();
+
+          public:
+              static SteamStub *get_singleton() { return singleton; }
+
+              Dictionary steamInit(const Variant &p_retrieve_stats, const Variant &p_app_id, const Variant &p_embed);
+              void run_callbacks();
+
+              void findLeaderboard(const Variant &p_name);
+              void uploadLeaderboardScore(const Variant &p_score, const Variant &p_keep_best, const Variant &p_details, const Variant &p_leaderboard);
+              void attachLeaderboardUGC(const Variant &p_ugc, const Variant &p_leaderboard);
+              void downloadLeaderboardEntries(const Variant &p_start, const Variant &p_end, const Variant &p_type, const Variant &p_leaderboard);
+
+              bool requestUserInformation(const Variant &p_steam_id, const Variant &p_name_only);
+              String getFriendPersonaName(const Variant &p_steam_id);
+
+              void ugcDownload(const Variant &p_handle, const Variant &p_priority);
+              PackedByteArray ugcRead(const Variant &p_handle, const Variant &p_size, const Variant &p_offset, const Variant &p_action);
+
+              void fileShare(const Variant &p_name);
+              Dictionary fileRead(const Variant &p_name, const Variant &p_size);
+              int64_t getFileSize(const Variant &p_name);
+              bool fileWrite(const Variant &p_name, const Variant &p_data);
+              bool fileDelete(const Variant &p_name);
+
+              SteamStub();
+              ~SteamStub();
+          };
+
+          #endif
+          STUB_EOF
+
+          cat > steam_stub.cpp <<'STUB_EOF'
+          #include "steam_stub.h"
+
+          SteamStub *SteamStub::singleton = nullptr;
+
+          SteamStub::SteamStub() {
+              singleton = this;
+          }
+
+          SteamStub::~SteamStub() {
+              if (singleton == this) {
+                  singleton = nullptr;
+              }
+          }
+
+          void SteamStub::_bind_methods() {
+              ClassDB::bind_method(D_METHOD("steamInit", "retrieve_stats", "app_id", "embed_callbacks"), &SteamStub::steamInit, DEFVAL(true), DEFVAL(0), DEFVAL(false));
+              ClassDB::bind_method(D_METHOD("run_callbacks"), &SteamStub::run_callbacks);
+
+              ClassDB::bind_method(D_METHOD("findLeaderboard", "name"), &SteamStub::findLeaderboard);
+              ClassDB::bind_method(D_METHOD("uploadLeaderboardScore", "score", "keep_best", "details", "leaderboard"), &SteamStub::uploadLeaderboardScore);
+              ClassDB::bind_method(D_METHOD("attachLeaderboardUGC", "ugc", "leaderboard"), &SteamStub::attachLeaderboardUGC);
+              ClassDB::bind_method(D_METHOD("downloadLeaderboardEntries", "start", "end", "type", "leaderboard"), &SteamStub::downloadLeaderboardEntries);
+
+              ClassDB::bind_method(D_METHOD("requestUserInformation", "steam_id", "name_only"), &SteamStub::requestUserInformation);
+              ClassDB::bind_method(D_METHOD("getFriendPersonaName", "steam_id"), &SteamStub::getFriendPersonaName);
+
+              ClassDB::bind_method(D_METHOD("ugcDownload", "handle", "priority"), &SteamStub::ugcDownload);
+              ClassDB::bind_method(D_METHOD("ugcRead", "handle", "size", "offset", "action"), &SteamStub::ugcRead);
+
+              ClassDB::bind_method(D_METHOD("fileShare", "name"), &SteamStub::fileShare);
+              ClassDB::bind_method(D_METHOD("fileRead", "name", "size"), &SteamStub::fileRead);
+              ClassDB::bind_method(D_METHOD("getFileSize", "name"), &SteamStub::getFileSize);
+              ClassDB::bind_method(D_METHOD("fileWrite", "name", "data"), &SteamStub::fileWrite);
+              ClassDB::bind_method(D_METHOD("fileDelete", "name"), &SteamStub::fileDelete);
+
+              ClassDB::bind_integer_constant(get_class_static(), StringName(), "LEADERBOARD_DATA_REQUEST_GLOBAL", 0);
+              ClassDB::bind_integer_constant(get_class_static(), StringName(), "UGC_READ_CONTINUE_READING_UNTIL_FINISHED", 0);
+
+              ADD_SIGNAL(MethodInfo("leaderboard_find_result", PropertyInfo(Variant::INT, "new_handle"), PropertyInfo(Variant::INT, "found")));
+              ADD_SIGNAL(MethodInfo("leaderboard_scores_downloaded", PropertyInfo(Variant::STRING, "message"), PropertyInfo(Variant::INT, "leaderboard_handle"), PropertyInfo(Variant::ARRAY, "result")));
+              ADD_SIGNAL(MethodInfo("persona_state_change", PropertyInfo(Variant::INT, "steam_id"), PropertyInfo(Variant::INT, "flag")));
+              ADD_SIGNAL(MethodInfo("download_ugc_result", PropertyInfo(Variant::INT, "result"), PropertyInfo(Variant::DICTIONARY, "download_data")));
+              ADD_SIGNAL(MethodInfo("file_share_result", PropertyInfo(Variant::INT, "result"), PropertyInfo(Variant::INT, "handle"), PropertyInfo(Variant::STRING, "name")));
+          }
+
+          Dictionary SteamStub::steamInit(const Variant &p_retrieve_stats, const Variant &p_app_id, const Variant &p_embed) {
+              Dictionary d;
+              d["status"] = 20;
+              d["verbal"] = "Steam stub: offline mode";
+              return d;
+          }
+
+          void SteamStub::run_callbacks() {
+          }
+
+          void SteamStub::findLeaderboard(const Variant &p_name) {
+              // The game awaits this signal, so answer (deferred) with "not found".
+              call_deferred("emit_signal", "leaderboard_find_result", 0, 0);
+          }
+
+          void SteamStub::uploadLeaderboardScore(const Variant &p_score, const Variant &p_keep_best, const Variant &p_details, const Variant &p_leaderboard) {
+          }
+
+          void SteamStub::attachLeaderboardUGC(const Variant &p_ugc, const Variant &p_leaderboard) {
+          }
+
+          void SteamStub::downloadLeaderboardEntries(const Variant &p_start, const Variant &p_end, const Variant &p_type, const Variant &p_leaderboard) {
+              call_deferred("emit_signal", "leaderboard_scores_downloaded", String("stub"), p_leaderboard, Array());
+          }
+
+          bool SteamStub::requestUserInformation(const Variant &p_steam_id, const Variant &p_name_only) {
+              return false;
+          }
+
+          String SteamStub::getFriendPersonaName(const Variant &p_steam_id) {
+              return String();
+          }
+
+          void SteamStub::ugcDownload(const Variant &p_handle, const Variant &p_priority) {
+          }
+
+          PackedByteArray SteamStub::ugcRead(const Variant &p_handle, const Variant &p_size, const Variant &p_offset, const Variant &p_action) {
+              return PackedByteArray();
+          }
+
+          void SteamStub::fileShare(const Variant &p_name) {
+          }
+
+          Dictionary SteamStub::fileRead(const Variant &p_name, const Variant &p_size) {
+              Dictionary d;
+              d["ret"] = false;
+              d["buf"] = PackedByteArray();
+              return d;
+          }
+
+          int64_t SteamStub::getFileSize(const Variant &p_name) {
+              return 0;
+          }
+
+          bool SteamStub::fileWrite(const Variant &p_name, const Variant &p_data) {
+              return false;
+          }
+
+          bool SteamStub::fileDelete(const Variant &p_name) {
+              return false;
+          }
+          STUB_EOF
+
+          ls -la
+
+      - name: Build Android debug template (arm64)
+        run: scons platform=android target=template_debug arch=arm64 generate_android_binaries=yes debug_symbols=no -j4
+
+      - name: Fallback - package template with Gradle
+        if: ${{ hashFiles('bin/android_debug.apk') == '' }}
+        run: |
+          cd platform/android/java
+          ./gradlew generateGodotTemplates
+          cd ../../..
+          ls -la bin
+
+      - name: List output
+        run: ls -la bin
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: godot-steam-stub-runtime
+          path: bin/android_debug.apk
